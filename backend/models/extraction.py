@@ -39,6 +39,9 @@ class ExtractionResult(BaseModel):
     download_url: str
 
 
+
+
+
 class ExtractionSession(BaseModel):
     """Complete extraction session information."""
     session_id: str

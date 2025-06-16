@@ -2,141 +2,71 @@
 
 import asyncio
 from typing import Dict, List, Optional
+import sys
 
-from crawl4ai import AsyncWebCrawler
+from crawl4ai import AsyncWebCrawler, BrowserConfig
 from loguru import logger
 
 from core.config import settings
 
+# This check is still useful but won't solve the core issue on its own.
+if sys.platform.startswith('win'):
+    # Using ProactorEventLoopPolicy here is not needed as the conflict is with the main app's loop.
+    pass
 
 class WebCrawlTool:
-    """Web crawling tool using Crawl4AI."""
+    """Synchronous wrapper for Crawl4AI to be run in a separate thread."""
     
     def __init__(self):
-        self.crawler: Optional[AsyncWebCrawler] = None
-    
-    async def __aenter__(self):
-        """Async context manager entry."""
-        self.crawler = AsyncWebCrawler(
-            verbose=settings.DEBUG,
-            headless=True,
-        )
-        await self.crawler.__aenter__()
-        return self
-    
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Async context manager exit."""
-        if self.crawler:
-            await self.crawler.__aexit__(exc_type, exc_val, exc_tb)
-    
-    async def crawl_single_page(self, url: str, return_format: str = "markdown") -> Dict[str, str]:
-        """
-        Crawl a single web page and return content in specified format.
-        
-        Args:
-            url: Target URL to crawl
-            return_format: Format to return ("html" or "markdown")
-            
-        Returns:
-            Dictionary containing url and content in specified format
-        """
-        try:
-            if not self.crawler:
-                raise RuntimeError("Crawler not initialized. Use async context manager.")
-            
-            logger.info(f"Crawling URL: {url}")
-            
-            result = await self.crawler.arun(
-                url=url,
-                word_count_threshold=10,
-                extraction_strategy="NoExtractionStrategy",
-                chunking_strategy="NlpSentenceChunking",
-                bypass_cache=True,
+        # We will run the async crawler within a new event loop in a separate thread.
+        pass
+
+    def _run_crawl(self, urls: List[str], return_format: str = "markdown") -> List[Dict[str, str]]:
+        """The actual crawling logic that will be run in a new event loop."""
+        async def crawl_logic():
+            browser_config = BrowserConfig(
+                headless=True,
+                verbose=settings.DEBUG,
+                extra_args=[
+                    '--no-sandbox', 
+                    '--disable-dev-shm-usage',
+                ]
             )
-            
-            if not result.success:
-                logger.error(f"Failed to crawl {url}: {result.error_message}")
-                return {
-                    "url": url,
-                    "content": "",
-                    "format": return_format,
-                    "error": result.error_message or "Unknown error"
-                }
-            
-            # Choose content based on return_format
-            if return_format.lower() == "html":
-                content = result.html
-                content_type = "raw_html"
-            else:  # default to markdown
-                content = result.markdown
-                content_type = "markdown"
-            
-            logger.info(f"Successfully crawled {url}, {content_type} length: {len(content)}")
-            
-            return {
-                "url": url,
-                "content": content,
-                "format": return_format,
-                "success": True
-            }
-            
-        except Exception as e:
-            logger.error(f"Exception while crawling {url}: {str(e)}")
-            return {
-                "url": url,
-                "content": "",
-                "format": return_format,
-                "error": str(e)
-            }
-    
-    async def crawl_multiple_pages(self, urls: List[str], return_format: str = "markdown") -> List[Dict[str, str]]:
-        """
-        Crawl multiple web pages concurrently.
-        
-        Args:
-            urls: List of URLs to crawl
-            return_format: Format to return ("html" or "markdown")
-            
-        Returns:
-            List of dictionaries containing url and content in specified format
-        """
+            # The crawler is now created and used entirely within this async function
+            async with AsyncWebCrawler(config=browser_config) as crawler:
+                tasks = [crawler.arun(url=url, word_count_threshold=10) for url in urls]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            processed_results = []
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    logger.error(f"Exception for URL {urls[i]}: {str(result)}")
+                    processed_results.append({"url": urls[i], "content": "", "error": str(result)})
+                elif not result.success:
+                    logger.error(f"Failed to crawl {urls[i]}: {result.error_message}")
+                    processed_results.append({"url": urls[i], "content": "", "error": result.error_message})
+                else:
+                    content = result.html if return_format.lower() == "html" else result.markdown
+                    processed_results.append({"url": urls[i], "content": content, "success": True})
+            return processed_results
+
+        # Run the async crawl_logic in a new event loop for this thread.
+        return asyncio.run(crawl_logic())
+
+    def crawl_pages(self, urls: List[str], return_format: str = "markdown") -> List[Dict[str, str]]:
+        """Public synchronous method to be called from the main thread."""
         if not urls:
             return []
         
-        logger.info(f"Crawling {len(urls)} URLs concurrently")
-        
-        # Create semaphore to limit concurrent requests
-        semaphore = asyncio.Semaphore(5)  # Limit to 5 concurrent requests
-        
-        async def crawl_with_semaphore(url: str) -> Dict[str, str]:
-            async with semaphore:
-                return await self.crawl_single_page(url, return_format)
-        
-        tasks = [crawl_with_semaphore(url) for url in urls]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Handle exceptions in results
-        processed_results = []
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                logger.error(f"Exception for URL {urls[i]}: {str(result)}")
-                processed_results.append({
-                    "url": urls[i],
-                    "content": "",
-                    "format": return_format,
-                    "error": str(result)
-                })
-            else:
-                processed_results.append(result)
-        
-        logger.info(f"Completed crawling {len(urls)} URLs")
-        return processed_results
-
+        logger.info(f"Starting crawl for {len(urls)} URLs in a separate thread.")
+        results = self._run_crawl(urls, return_format)
+        logger.info(f"Completed crawling {len(urls)} URLs in a separate thread.")
+        return results
 
 # ADK Tool Function
 async def web_crawl(url: str, urls: Optional[List[str]] = None, return_format: str = "markdown") -> Dict:
     """
-    ADK tool function for web crawling.
+    ADK tool function for web crawling that runs the crawler in a separate thread.
     
     Args:
         url: Single URL to crawl
@@ -148,13 +78,24 @@ async def web_crawl(url: str, urls: Optional[List[str]] = None, return_format: s
     """
     if not url and not urls:
         return {"error": "Either 'url' or 'urls' parameter must be provided"}
+
+    target_urls = urls if urls else [url]
     
-    async with WebCrawlTool() as crawler:
+    # Create an instance of the synchronous wrapper
+    crawler = WebCrawlTool()
+
+    try:
+        # Run the blocking `crawl_pages` method in a separate thread
+        # This avoids the NotImplementedError by not using the ProactorEventLoop for subprocesses.
+        results = await asyncio.to_thread(crawler.crawl_pages, target_urls, return_format)
+        
         if url:
-            # Single URL crawling
-            result = await crawler.crawl_single_page(url, return_format)
-            return {"single_result": result}
+            # If a single URL was passed, return a single result
+            return {"single_result": results[0] if results else {"url": url, "error": "Crawl returned no result."}}
         else:
-            # Multiple URLs crawling
-            results = await crawler.crawl_multiple_pages(urls, return_format)
+            # Otherwise, return all results
             return {"multiple_results": results}
+            
+    except Exception as e:
+        logger.error(f"An unexpected error occurred in web_crawl tool: {e}")
+        return {"error": f"Failed to execute crawl: {str(e)}"}
