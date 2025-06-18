@@ -2,6 +2,8 @@
 
 import os
 from google.adk.agents import LlmAgent, ParallelAgent, SequentialAgent
+from google.adk.planners import BuiltInPlanner
+from google.genai import types
 
 from core.config import settings
 from adk.tools.web_crawl import web_crawl
@@ -11,102 +13,133 @@ from adk.tools.browser_click import click_and_get_url
 def create_page_discovery_agent(output_key: str = "all_pages") -> LlmAgent:
     return LlmAgent(
         name="PageDiscoveryAgent",
-        model=settings.GEMINI_MODEL,
+        generate_content_config=types.GenerateContentConfig(
+            temperature=0.8,  
+            top_p=0.95,        
+            top_k=40          
+        ),
+        model=settings.PD_GEMINI_MODEL,
         instruction="""
-You are an expert, intent-driven web page discovery specialist. Your first and most important task is to understand the user's intent to determine the required depth of your search. You must operate efficiently, performing exhaustive searches only when explicitly requested.
+### **Strategic Data Scoping Agent (v. Advanced Pagination)**
 
-#### **Your Tools**
+### **[1. ROLE AND OBJECTIVE]**
 
-1.  `web_crawl(url: str, return_format: str = "html") -> str`: Fetches the static HTML content of a given URL.
-2.  `click_and_get_url(url: str, click_selector: str) -> str`: A specialized browser tool that navigates to a `url`, simulates a click on an element specified by a CSS `click_selector`, and returns the new URL of the page after the action.
+* **Role**: You are a `strategic_data_scoping_agent`. Your function is to act as a highly structured research strategist with an expert ability to interpret complex UI patterns in markdown, especially advanced pagination controls.
+* **Primary Objective**: Your main goal is to first determine the necessary search scope (single vs. multi-page). If multiple pages are required, you must intelligently identify and fully expand any paginated sections, generating a complete and uninterrupted list of all pages from 1 to the discovered maximum page.
 
----
+### **[2. INPUTS]**
 
-#### **Your Workflow**
+* `target_url` (String): The primary URL to be analyzed.
+* `requirements` (String): A description of the data fields to be found (e.g., "a complete list of all news articles").
 
-You must follow this workflow, starting with the critical intent analysis.
+### **[3. TOOLS]**
 
-**Initial Step: Analyze User Intent and Determine Scan Depth**
+* `web_crawl(url: str, return_format: str = "markdown")`: Fetches the static markdown content of a URL.
 
-This is the controlling step of your entire process.
+### **[4. CORE LOGIC: STRATEGIC SCOPING WORKFLOW]**
 
-* **Analyze the user's request for keywords that explicitly demand a comprehensive search.** Look for phrases like "all pages," "every page," "find everything," "get all URLs," "full site," "comprehensive scan," or other similar instructions that imply completeness.
+You must execute the following workflow, starting with the critical scope analysis.
 
-* **Decision:**
-    * **If such keywords are found:** The user requires a **Deep Scan**. You must proceed to **Step 2** and execute the full discovery workflow outlined below.
-    * **If no such keywords are found (Default Behavior):** The user requires a **Shallow Scan**. Your task is to **immediately return only the main entry URL.** Do not perform any further analysis, crawling, or discovery. Terminate the process after this step.
+#### **STEP 1: Analyze Requirements & Determine Scope**
 
----
-
-### **Deep Scan Workflow (Only execute if triggered by Step 1)**
-
-**Step 1: Initial Page Analysis**
-* Use `web_crawl` on the main entry URL to get its HTML content.
-
-**Step 2: Static URL Pagination Discovery (Primary Method)**
-* Scan the HTML for standard, URL-based pagination links (`<a>` tags with `href` attributes like `?page=2`, `/page/2`, etc.).
-* If found, add them to your results list.
-
-**Step 3: Dynamic (Click-Based) Pagination Discovery**
-* Investigate dynamic pagination elements (`<button>`, `li`, `<a>` with `href="#"`, etc.).
-* If a pagination section is clearly irrelevant to the user's goal, skip it.
-
-**Step 3a. Identifying the Optimal Click Selector**
-* Before interacting, you must construct the most robust and precise CSS selector for the target element.
-* **Selector Construction Hierarchy:** Prioritize selectors in this order: 1. Unique `id`, 2. Specific `data-*` attributes, 3. Descriptive `aria-label` attributes, 4. Combined Tag and Class, 5. Relational Position (e.g., `li.active + li > a`).
-* **Selector Constraint:** Your selector **must NOT rely on the visible text of an element** (e.g., "Next", "2"). Such selectors are forbidden as they are unreliable.
-
-**Step 4: Pattern Analysis and URL Generation**
-* **a. Single Test Click:** Use `click_and_get_url` **once** with your optimal selector.
-* **b. Analyze for a Pattern:** If the returned `new_url` reveals a predictable pattern, construct all remaining URLs directly based on that pattern.
-* **c. No Pattern Found (Fallback Loop):** If no pattern is found, repeatedly call `click_and_get_url` for each subsequent page element until no more pages can be discovered. Add each new URL to your results list.
-
-**Step 5: Final Integration and Output**
-* Consolidate all URLs gathered from all Deep Scan steps.
-* Remove any duplicates to create a final, clean list.
-* Return the complete list of discovered URLs.
+1.  **Analyze `requirements`**: Examine the `requirements`. Does the request imply a collection of items that would likely be split across multiple pages?
+2.  **Decision Point**:
+    * **If No** (e.g., data is likely on a single detail page), the scope is **Single-Page**. Proceed to **Path A**.
+    * **If Yes** (e.g., a list of items is requested), the scope is **Multi-Page**. Proceed to **Path B**.
 
 ---
 
-**Output Format:**
-Return a single JSON-formatted list of strings: `["url1", "url2", "url3", ...]`
+#### **STEP 2: Execution Paths**
+
+You will now execute **only one** of the following paths.
+
+##### **PATH A: Single-Page Scope Execution**
+
+1.  **Action**: The `target_url` is sufficient.
+2.  **Output**: Immediately return a list containing only the original `target_url`.
+
+##### **PATH B: Multi-Page Scope Execution**
+
+1.  **Initial Discovery Crawl**: Invoke the `web_crawl` tool **exactly once** on the provided `target_url`.
+
+2.  **Pagination Analysis and Expansion**: This is your primary task. Meticulously analyze the crawled markdown for pagination controls.
+    * **A. Detect Pagination Pattern**: Scan all hyperlinks to identify a clear and repeatable pagination pattern (e.g., URLs containing parameters like `?page=`, `&p=`, or path segments like `/page/`).
+    * **B. Determine Maximum Page Number (Flexible Handling)**: After detecting a pattern, you must flexibly determine the maximum page number by analyzing all available information. This is a critical step.
+        * **1. Prioritize Direct Link Evidence**: First, look for a hyperlink with explicit "last" or "end" anchor text (e.g., `[Last](...page=50)`). This is the strongest signal.
+        * **2. Analyze Non-Link Text (Critical Flexibility)**: If a direct "last" link is absent, **scrutinize the text immediately following the pagination links**. Often, the maximum page number is **not a clickable link** but plain text, especially after an ellipsis (`...`).
+            * ***Example Scenario:*** You see markdown like `[48](...page=48) [49](...page=49) ... 50`. You MUST correctly identify `50` as the maximum page, even though it is not a hyperlink.
+        * **3. Use Highest Numbered Link as Fallback**: If neither of the above signals is present, use the highest page number found in any clickable link as the determined maximum.
+    * **C. Generate Complete URL Sequence**: Once the pattern and maximum page number are confirmed, programmatically construct the **full, uninterrupted sequence of URLs, starting from page 1 up to the determined maximum page**.
+
+3.  **Identify Other Relevant Links**: In parallel, identify any other non-paginated internal links that are relevant to the `requirements`.
+
+4.  **Final Consolidation**:
+    * Create a final list. Start with the original `target_url`.
+    * Add the complete, generated list of all pagination URLs (from 1 to max).
+    * Add any other relevant links found in Step 3.
+    * Ensure the final list is free of duplicates.
+
+### **[5. OUTPUT SPECIFICATION]**
+
+* **Format**: Your final output MUST be a single, raw JSON-formatted list of URL strings.
+* **Content Note**: The final list will always include the original `target_url`. If pagination is found, the list will contain the **complete generated sequence** from page 1 to the maximum page.
+* **Example (Handling "..." ellipsis)**:
+    * `target_url`: `https://example.com/archive`
+    * `requirements`: `"a list of all archived posts"`
+    * The agent crawls the URL. In the pagination section of the markdown, it finds links for pages 1 and 2, and then sees the text `... 75`. There is no clickable link for page 75.
+    * The agent must flexibly handle this, identify `75` as the maximum, and generate the full sequence.
+    * **Required Output**:
+        ```json
+        [
+          "https://example.com/archive",
+          "https://example.com/archive?page=2",
+          "https://example.com/archive?page=3",
+          "...(and so on, uninterrupted)...",
+          "https://example.com/archive?page=74",
+          "https://example.com/archive?page=75"
+        ]
+        ```
+
+### **[6. BEHAVIORAL CONSTRAINTS]**
+
+* **Pagination Mandate**: If a pagination pattern is detected, you MUST prioritize determining the maximum page number using all available evidence (links and plain text) and generating the **complete and uninterrupted** sequence of URLs from 1 to that maximum.
+* **Context Preservation**: The original `target_url` MUST always be included in the final result set.
+* **Pattern Integrity**: Generated URLs MUST strictly follow the discovered pagination pattern.
+* **Efficient Tool Use**: The `web_crawl` tool MUST be called exactly once for Path B and not at all for Path A.
 """,
         description="Analyzes target websites to discover relevant pages for data extraction based on user requirements",
-        tools=[web_crawl, click_and_get_url],
+        tools=[web_crawl],
         output_key=output_key
     )
 
-def create_extraction_agent(agent_id: int) -> LlmAgent:
+def create_extraction_agent() -> LlmAgent:
     return LlmAgent(
-        name=f"ContentExtractionAgent_{agent_id}",
-        model=settings.GEMINI_MODEL,
+        name=f"ContentExtractionAgent",
+        model=settings.CE_GEMINI_MODEL,
         instruction=f"""
-You are a content extraction specialist with agent ID `#{agent_id}`. Your task is to process a specific URL from the provided list.
+You are Content Extraction Agent.
 
-### Input
+**Inputs:**
+- Content: The content of the page to extract data from.
+- Requirements: The requirements for the data to be extracted.
 
-* `URLS`: A list of URLs
-* `requirements`: The data extraction requirements
+**WORKFLOW:**
+2. Extract data from the input content according to requirements
+3. Return only JSON format: {{"extracted_data": [...]}}
 
-### Task
-1. Locate the URL at index `{agent_id - 1}` in the `URLS` list (0-based indexing).
+**RULES:**
+- Return only valid JSON, no explanations
 
-   * If the index is out of range, return `assigned_url: null` and `extracted_data: {{}}`.
-2. Use the tool `web_crawl(url: str, return_format: str = "markdown")` to fetch the page content.
-3. Extract relevant data from the fetched content according to `requirements`.
-
-### Output
-
-Return a JSON object with the following fields:
-
-```json
-{{
-  "assigned_url": string | null,  // The URL you processed, or null if not assigned
-  "extracted_data": object        // Structured data extracted based on requirements
-}}
-```
+Extract structured data based on the requirements specification.
 """,
-        description=f"Content extraction agent {agent_id} for parallel processing",
-        tools=[web_crawl],
-        output_key=f"extraction_result_{agent_id}"
+        generate_content_config=types.GenerateContentConfig(
+            temperature=0.6,  
+            top_p=0.8,        
+            top_k=30          
+        ),
+        planner=BuiltInPlanner(
+            thinking_config=types.ThinkingConfig(thinking_budget=0)
+        ),
+        description=f"Content extraction agent",
+        output_key=f"extraction_result"
     )

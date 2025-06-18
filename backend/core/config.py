@@ -20,9 +20,11 @@ class Settings(BaseSettings):
     DEBUG: bool = False
 
     # LLM Configuration
-    GOOGLE_API_KEY: str = os.getenv("GOOGLE_API_KEY")
-    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL")
-    GOOGLE_GENAI_USE_VERTEXAI: bool = False
+    PD_GEMINI_MODEL: str = os.getenv("PD_GEMINI_MODEL", "")
+    CE_GEMINI_MODEL: str = os.getenv("CE_GEMINI_MODEL", "")
+    GOOGLE_GENAI_USE_VERTEXAI: bool = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", True)
+    GOOGLE_CLOUD_PROJECT: Optional[str] = os.getenv("GOOGLE_CLOUD_PROJECT", "stellar-acre-233805")
+    GOOGLE_CLOUD_LOCATION: Optional[str] = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
     
     # Crawl4AI Configuration
     CRAWL4AI_TIMEOUT: int = 30

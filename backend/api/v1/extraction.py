@@ -20,9 +20,9 @@ router = APIRouter()
 active_sessions: Dict[str, Dict[str, Any]] = {}
 
 # Connection timeout settings
-CONNECTION_TIMEOUT = 300  # 5 minutes
-PING_INTERVAL = 30  # 30 seconds
-PONG_TIMEOUT = 10  # 10 seconds
+CONNECTION_TIMEOUT = 1800  # 30 minutes for long-running tasks
+PING_INTERVAL = 60  # 60 seconds
+PONG_TIMEOUT = 30  # 30 seconds
 
 
 class ConnectionManager:
@@ -104,12 +104,27 @@ class ConnectionManager:
                 if not connection_info["is_alive"]:
                     break
                 
+                # Check if session has active extraction task
+                has_active_task = (session_id in active_sessions and 
+                                 active_sessions[session_id]["status"] in ["initializing", "in-progress"])
+                
+                # Use longer timeout for active extraction tasks
+                timeout_duration = CONNECTION_TIMEOUT * 2 if has_active_task else CONNECTION_TIMEOUT
+                
                 # Check if connection is stale
                 last_ping = connection_info["last_ping"]
-                if datetime.now() - last_ping > timedelta(seconds=CONNECTION_TIMEOUT):
-                    logger.warning(f"Connection timeout for session {session_id}")
+                if datetime.now() - last_ping > timedelta(seconds=timeout_duration):
+                    logger.warning(f"Connection timeout for session {session_id} (active_task: {has_active_task})")
                     self.disconnect(session_id)
                     break
+                
+                # Send periodic ping to keep connection alive during long tasks
+                if has_active_task:
+                    await self.send_message(session_id, {
+                        "type": "keep_alive",
+                        "timestamp": datetime.now().isoformat(),
+                        "session_status": active_sessions[session_id]["status"]
+                    })
                 
                 await asyncio.sleep(PING_INTERVAL)
                 
@@ -145,8 +160,13 @@ async def websocket_extraction(websocket: WebSocket, session_id: str):
     try:
         while True:
             # Set receive timeout to detect dead connections
+            # Use longer timeout during active extraction
+            has_active_task = (session_id in active_sessions and 
+                             active_sessions[session_id]["status"] in ["initializing", "in-progress"])
+            receive_timeout = 180.0 if has_active_task else 60.0
+            
             try:
-                data = await asyncio.wait_for(websocket.receive_text(), timeout=60.0)
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=receive_timeout)
                 message = json.loads(data)
                 
                 # Handle different message types
@@ -173,9 +193,15 @@ async def websocket_extraction(websocket: WebSocket, session_id: str):
                     connection_info = manager.active_connections[session_id]
                     last_ping = connection_info["last_ping"]
                     
-                    if datetime.now() - last_ping > timedelta(seconds=PONG_TIMEOUT):
-                        logger.warning(f"Client {session_id} failed to respond to heartbeat")
+                    # Be more lenient during active extraction tasks
+                    pong_timeout = PONG_TIMEOUT * 3 if has_active_task else PONG_TIMEOUT
+                    
+                    if datetime.now() - last_ping > timedelta(seconds=pong_timeout):
+                        logger.warning(f"Client {session_id} failed to respond to heartbeat (active_task: {has_active_task})")
                         break
+                    else:
+                        # Continue waiting, connection might still be alive
+                        continue
                 else:
                     break
                     
@@ -214,6 +240,7 @@ async def start_extraction(request: ExtractionRequest):
         "requirements": request.requirements,
         "status": "initializing",
         "created_at": datetime.now(),
+        "last_activity": datetime.now(),  # Track last activity
         "workflow": workflow,  # Store workflow instance
         "stages": [
             {
@@ -257,6 +284,10 @@ async def run_extraction(session_id: str, url: str, requirements: str):
             logger.error(f"Session {session_id} not found")
             return
             
+        # Mark as in-progress
+        active_sessions[session_id]["status"] = "in-progress"
+        active_sessions[session_id]["last_activity"] = datetime.now()
+        
         workflow = active_sessions[session_id]["workflow"]
         
         # Stage 1: Page Discovery
@@ -274,11 +305,23 @@ async def run_extraction(session_id: str, url: str, requirements: str):
             discovered_links = []
         
         # Stage 2: Content Extraction
-
-        # await asyncio.sleep(40)
-
         logger.info(f"Starting content extraction for session {session_id}")
         await update_stage_status(session_id, 1, "in-progress", 0, "Starting content extraction...")
+        
+        # Send periodic heartbeat during extraction to keep connection alive
+        async def extraction_heartbeat():
+            while (session_id in active_sessions and 
+                   active_sessions[session_id]["status"] == "in-progress"):
+                await asyncio.sleep(30)  # Send heartbeat every 30 seconds
+                if session_id in active_sessions:
+                    await manager.send_message(session_id, {
+                        "type": "extraction_heartbeat",
+                        "timestamp": datetime.now().isoformat(),
+                        "message": "Extraction in progress..."
+                    })
+        
+        # Start heartbeat task
+        heartbeat_task = asyncio.create_task(extraction_heartbeat())
         
         try:
             if discovered_links:
@@ -320,7 +363,7 @@ async def run_extraction(session_id: str, url: str, requirements: str):
                 record_count = 0
                 field_count = 0
                 
-                integrated_data = workflow_data.get("integrated_data", [])[0]
+                integrated_data = workflow_data.get("integrated_data", [])
                 if integrated_data:
                     # Generate CSV from real data
                     # Get all unique keys from integrated_data
@@ -373,6 +416,10 @@ async def run_extraction(session_id: str, url: str, requirements: str):
             logger.error(f"Result integration failed for session {session_id}: {e}")
             await update_stage_status(session_id, 2, "completed", 100, f"Integration failed: {str(e)}")
         
+        # Cancel heartbeat task
+        if 'heartbeat_task' in locals():
+            heartbeat_task.cancel()
+        
         # Send completion message
         logger.info(f"Extraction completed for session {session_id}")
         await manager.send_message(session_id, {
@@ -382,6 +429,11 @@ async def run_extraction(session_id: str, url: str, requirements: str):
         
     except Exception as e:
         logger.error(f"Extraction failed for session {session_id}: {e}")
+        
+        # Cancel heartbeat task if it exists
+        if 'heartbeat_task' in locals():
+            heartbeat_task.cancel()
+        
         await manager.send_message(session_id, {
             "type": "extraction_error",
             "error": str(e)
@@ -396,6 +448,9 @@ async def update_stage_status(session_id: str, stage_index: int, status: str, pr
     if session_id not in active_sessions:
         logger.warning(f"Session {session_id} not found in active_sessions")
         return
+    
+    # Update last activity timestamp
+    active_sessions[session_id]["last_activity"] = datetime.now()
     
     # Update session data
     active_sessions[session_id]["stages"][stage_index].update({
@@ -471,11 +526,10 @@ async def get_preview_data(session_id: str, limit: int = 5):
             "total_records": 0
         }
     
-    integrated_data_list = integrated_data[0] if integrated_data else []
-    logger.info(f"Session {session_id} integrated_data_list length: {len(integrated_data_list) if isinstance(integrated_data_list, list) else 'not a list'}")
+    logger.info(f"Session {session_id} integrated_data length: {len(integrated_data)}")
     
-    if not integrated_data_list:
-        logger.info(f"Session {session_id} no integrated_data_list, returning empty")
+    if not integrated_data:
+        logger.info(f"Session {session_id} no integrated_data, returning empty")
         return {
             "headers": [],
             "data": [],
@@ -483,7 +537,7 @@ async def get_preview_data(session_id: str, limit: int = 5):
         }
     
     # Get preview data (limited)
-    preview_data = integrated_data_list[:limit] if isinstance(integrated_data_list, list) else []
+    preview_data = integrated_data[:limit] if isinstance(integrated_data, list) else []
     logger.info(f"Session {session_id} preview_data length: {len(preview_data)}")
     
     # Extract headers from the first item
@@ -496,7 +550,7 @@ async def get_preview_data(session_id: str, limit: int = 5):
     return {
         "headers": headers,
         "data": preview_data,
-        "total_records": len(integrated_data_list) if isinstance(integrated_data_list, list) else 0
+        "total_records": len(integrated_data) if isinstance(integrated_data, list) else 0
     }
 
 

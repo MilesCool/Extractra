@@ -22,12 +22,14 @@ from loguru import logger
 
 from adk.agents import create_extraction_agent, create_page_discovery_agent
 from core.config import settings
+from adk.tools.web_crawl import web_crawl
+
+from dotenv import load_dotenv
+load_dotenv(dotenv_path="backend/.env")
 
 # Constants
 APP_NAME = "extractra_parallel_workflow"
 USER_ID = "user_1"
-MODEL = settings.GEMINI_MODEL
-        
 
 class ParallelExtractionWorkflow:
     """Parallel extraction workflow manager with three distinct phases."""
@@ -42,17 +44,18 @@ class ParallelExtractionWorkflow:
         self.user_id = user_id
         self.progress_callback = progress_callback
         self.session_service = InMemorySessionService()
+        self.batch_size = 2
         
         # Page Discovery Agent
         self.page_discovery_agent = create_page_discovery_agent("discovered_links")
 
         # Create 2 parallel extraction agents
-        extraction_agents = [create_extraction_agent(i) for i in range(1, 3)]
-        self.parallel_extraction_agent = ParallelAgent(
-            name="ParallelExtractionAgent",
-            sub_agents=extraction_agents,
-            description="Coordinates n parallel content extraction agents"
-        )
+        self.extraction_agent = create_extraction_agent()
+        # self.parallel_extraction_agent = ParallelAgent(
+        #     name="ParallelExtractionAgent",
+        #     sub_agents=extraction_agents,
+        #     description="Coordinates n parallel content extraction agents"
+        # )
 
         # Initialize runner
         self.runner = None
@@ -83,7 +86,7 @@ class ParallelExtractionWorkflow:
         else:
             return content
 
-    def split_links_into_batches(self, links: List[str], batch_size: int = 2) -> List[List[str]]:
+    def split_links_into_batches(self, links: List[str], batch_size: int = 5) -> List[List[str]]:
         """Split links into batches of specified size."""
         batches = []
         if len(links) < batch_size:
@@ -132,7 +135,7 @@ class ParallelExtractionWorkflow:
         # Run page discovery
         async for event in self.runner.run_async(
             user_id=self.user_id, 
-                session_id=self.main_session.id, 
+            session_id=self.main_session.id, 
             new_message=user_message
         ):
             if event.is_final_response():
@@ -172,16 +175,20 @@ class ParallelExtractionWorkflow:
         if not self.discovered_links:
             raise ValueError("No links available for extraction. Run page discovery first.")
         
-        # Split links into batches of 2
-        link_batches = self.split_links_into_batches(self.discovered_links, 2)
+        # Split links into batches of 5
+        # link_batches = self.split_links_into_batches(self.discovered_links, self.batch_size)
         self.extraction_results = []
 
         # Switch runner to parallel extraction agent
-        self.runner.agent = self.parallel_extraction_agent
+        # self.runner.agent = self.parallel_extraction_agent
     
         # Process each batch
-        for batch_idx, batch_urls in enumerate(link_batches):
-            logger.info(f"🔄 Processing batch {batch_idx + 1}/{len(link_batches)} with {len(batch_urls)} URLs")
+        for batch_idx, url in enumerate(self.discovered_links):
+            batch_runner = Runner(
+                agent=self.extraction_agent,
+                app_name=APP_NAME,
+                session_service=self.session_service
+            )
             
             # Update progress at start of batch
             batch_progress = int((len(self.extraction_results) / len(self.discovered_links)) * 100)
@@ -199,15 +206,19 @@ class ParallelExtractionWorkflow:
                 user_id=self.user_id,
                 session_id=f"batch_session_{batch_idx}",
             )
+
+            content = await web_crawl(url, return_format="markdown")
             
             # Create batch message
+            message_text = f"Content: {content}\nRequirements: {requirements}"
+            
             batch_message = types.Content(
                 role='user',
-                parts=[types.Part(text=f"URLs: {json.dumps(batch_urls)}\nRequirements: {requirements}")]
+                parts=[types.Part(text=message_text)]
             )
             
             # Run parallel extraction for this batch
-            async for event in self.runner.run_async(
+            async for event in batch_runner.run_async(
                 user_id=self.user_id,
                 session_id=batch_session.id,
                 new_message=batch_message,
@@ -226,13 +237,14 @@ class ParallelExtractionWorkflow:
             
             # Extract results from all agents
             batch_results = []
-            for i in range(1, len(batch_urls) + 1):
-                agent_result = batch_result_session.state.get(f"extraction_result_{i}", {})
-                if agent_result:
-                    converted_result = self.convert_json(agent_result)
-                    batch_results.append(converted_result)
+            agent_result = batch_result_session.state.get(f"extraction_result", {})
+            if agent_result:
+                converted_result = self.convert_json(agent_result)
+                batch_results.append(converted_result)
+            else:
+                batch_results.append({"extracted_data": []})
             
-            logger.info("Waiting api rpm limit !!!")
+            # logger.info("Waiting api rpm limit !!!")
             self.extraction_results.extend(batch_results)
             logger.info(f"✅ Batch {batch_idx + 1} completed: {len(batch_results)} successful extractions")
 
@@ -256,7 +268,7 @@ class ParallelExtractionWorkflow:
         
         # Integrate all results
         self.final_data = {
-            "integrated_data": [item['extracted_data'] for item in self.extraction_results if 'extracted_data' in item]
+            "integrated_data": [data_item for item in self.extraction_results if 'extracted_data' in item for data_item in item['extracted_data']]
         }
         
         logger.info(f"✅ Integration completed: {len(self.final_data.get('integrated_data', []))} items integrated")
@@ -296,16 +308,16 @@ class ParallelExtractionWorkflow:
                         "discovered_links": discovered_links
                     },
                     "parallel_extraction": {
-                        "total_batches": len(self.split_links_into_batches(discovered_links, 2)),
+                        "total_batches": len(self.split_links_into_batches(discovered_links, self.batch_size)),
                         "total_extractions": len(extraction_results),
                         "extraction_results": extraction_results
                     },
-                    "result_integration": final_data.get("integrated_data", {})[0]
+                    "result_integration": final_data.get("integrated_data", {})
                 },
-                "final_data": final_data.get("integrated_data", {})[0],
+                "final_data": final_data.get("integrated_data", {}),
                 "metadata": {
                     "total_links_processed": len(discovered_links),
-                    "total_batches": len(self.split_links_into_batches(discovered_links, 2)),
+                    "total_batches": len(self.split_links_into_batches(discovered_links, self.batch_size)),
                     "successful_extractions": len(extraction_results),
                     "workflow_pattern": "discovery -> parallel_batches -> integration"
                 }
@@ -342,8 +354,8 @@ async def test_parallel_extraction():
     """Test the parallel extraction workflow."""
     logger.info("🧪 Testing Parallel Extraction Workflow")
     
-    test_url = "https://chat4data.ai/playground"
-    test_requirements = "Extract the following information from products on first page: product name, current price, original price, image URL, visible comments, and hidden comments."
+    test_url = "https://www.amazon.sg/s?k=rtx+4090"
+    test_requirements = "Extract the following information from products on all pages: product name, current price, original price, image URL."
     
     try:
         workflow = ParallelExtractionWorkflow(USER_ID)
