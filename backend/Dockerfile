@@ -73,7 +73,7 @@ RUN chown -R app:app /home/app/.cache
 
 # 复制应用代码并设置权限
 COPY . .
-RUN chown -R app:app /app
+RUN chown -R app:app /backend
 
 # 最终切换到 app 用户
 USER app
