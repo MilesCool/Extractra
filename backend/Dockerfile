@@ -2,12 +2,12 @@
 FROM python:3.11-slim
 
 # 设置工作目录
-WORKDIR /app
+WORKDIR /backend
 
 # 设置环境变量
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/app \
+    PYTHONPATH=/backend \
     PORT=8080
 
 # 安装系统依赖
@@ -55,7 +55,7 @@ RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | apt-key add
 RUN useradd --create-home --shell /bin/bash app
 
 # 复制 requirements.txt 并安装 Python 依赖
-COPY backend/requirements.txt .
+COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
 
@@ -72,7 +72,7 @@ RUN playwright install-deps chromium
 RUN chown -R app:app /home/app/.cache
 
 # 复制应用代码并设置权限
-COPY backend/ .
+COPY . .
 RUN chown -R app:app /app
 
 # 最终切换到 app 用户
