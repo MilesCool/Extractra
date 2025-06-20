@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     
     # Server Configuration
     HOST: str = "0.0.0.0"
-    PORT: int = 8000
+    PORT: int = 8080
     DEBUG: bool = False
 
     # LLM Configuration
@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     GOOGLE_GENAI_USE_VERTEXAI: bool = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", True)
     GOOGLE_CLOUD_PROJECT: Optional[str] = os.getenv("GOOGLE_CLOUD_PROJECT", "stellar-acre-233805")
     GOOGLE_CLOUD_LOCATION: Optional[str] = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+
+    FRONTED_DOMAIN: str = os.getenv("FRONTED_DOMAIN", "")
     
     # Crawl4AI Configuration
     CRAWL4AI_TIMEOUT: int = 30

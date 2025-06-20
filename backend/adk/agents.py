@@ -135,7 +135,8 @@ Extract structured data based on the requirements specification.
         generate_content_config=types.GenerateContentConfig(
             temperature=0.6,  
             top_p=0.8,        
-            top_k=30          
+            top_k=30,
+            response_mime_type="application/json"
         ),
         planner=BuiltInPlanner(
             thinking_config=types.ThinkingConfig(thinking_budget=0)

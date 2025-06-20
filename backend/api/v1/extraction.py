@@ -1,12 +1,15 @@
 """WebSocket endpoints for real-time data extraction with enhanced security."""
 
 import asyncio
+import csv
+import io
 import json
 import uuid
 from typing import Dict, Any
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, status
+from fastapi.responses import StreamingResponse
 from fastapi.websockets import WebSocketState
 from loguru import logger
 
@@ -365,28 +368,18 @@ async def run_extraction(session_id: str, url: str, requirements: str):
                 
                 integrated_data = workflow_data.get("integrated_data", [])
                 if integrated_data:
-                    # Generate CSV from real data
-                    # Get all unique keys from integrated_data
-                    all_keys = set()
-                    for item in integrated_data:
-                        if isinstance(item, dict):
-                            all_keys.update(item.keys())
+                    # Generate CSV from integrated data
+                    headers = list(integrated_data[0].keys())
                     
-                    # Create header row with all keys
-                    headers = sorted(list(all_keys))
-                    csv_lines = [",".join(headers)]
+                    csv_buffer = io.StringIO()
+                    csv_writer = csv.DictWriter(csv_buffer, fieldnames=headers, lineterminator='\n')
                     
-                    # Process each item in integrated_data
-                    for item in integrated_data:
-                        if isinstance(item, dict):
-                            row_values = []
-                            for key in headers:
-                                value = str(item.get(key, "")).replace(",", ";").replace("\n", " ").replace("\r", " ")
-                                # Keep full value without truncation
-                                row_values.append(value)
-                            csv_lines.append(",".join(row_values))
+                    csv_writer.writeheader()
+                    csv_writer.writerows(integrated_data)
                     
-                    csv_data = "\n".join(csv_lines)
+                    csv_data = csv_buffer.getvalue()
+                    csv_buffer.close()
+                    
                     record_count = len(integrated_data)
                     field_count = len(headers)
                 
@@ -565,13 +558,19 @@ async def download_result(session_id: str):
         raise HTTPException(status_code=400, detail="Extraction not completed")
     
     # Get pre-generated CSV data
-    import io
-    from fastapi.responses import StreamingResponse
-    
     csv_data = session.get("result", {}).get("csv_data", "")
     
+    # Add BOM for proper UTF-8 encoding in Excel
+    csv_with_bom = '\ufeff' + csv_data
+    
+    # Create BytesIO object with proper UTF-8 encoding
+    csv_bytes = io.BytesIO(csv_with_bom.encode('utf-8'))
+    
     return StreamingResponse(
-        io.StringIO(csv_data),
-        media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename=extraction_{session_id}.csv"}
+        csv_bytes,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f"attachment; filename=extraction_{session_id}.csv",
+            "Content-Type": "text/csv; charset=utf-8"
+        }
     ) 
