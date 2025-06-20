@@ -55,7 +55,7 @@ RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | apt-key add
 RUN useradd --create-home --shell /bin/bash app
 
 # 复制 requirements.txt 并安装 Python 依赖
-COPY requirements.txt .
+COPY backend/requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
 
@@ -72,7 +72,7 @@ RUN playwright install-deps chromium
 RUN chown -R app:app /home/app/.cache
 
 # 复制应用代码并设置权限
-COPY . .
+COPY backend/ .
 RUN chown -R app:app /app
 
 # 最终切换到 app 用户
