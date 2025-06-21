@@ -217,11 +217,6 @@ graph TD
     G --> B
     F -->|Yes| H[Task Complete]
     
-    %% Style definitions
-    classDef userNode fill:#e3f2fd
-    classDef agentNode fill:#f3e5f5
-    classDef decisionNode fill:#fff3e0
-    
     class A,E,G,H userNode
     class B,C,D agentNode
     class F decisionNode
